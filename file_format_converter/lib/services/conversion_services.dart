@@ -1,9 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart'
     as mlkit;
 import 'package:image/image.dart' as img;
@@ -177,127 +180,22 @@ class MlKitOcrEngine implements OcrEngine {
     if (candidates.isEmpty) return '';
     // Return the candidate with the highest text score
     candidates.sort((a, b) => _textScore(b).compareTo(_textScore(a)));
-    return _postProcessOcrText(candidates.first.trim());
+    return postProcessOcrText(candidates.first.trim());
   }
 
-  /// Enhanced image preprocessing pipeline for production-quality OCR.
-  /// Steps: grayscale → adaptive binarization → noise reduction → sharpening
+  /// Image preprocessing for OCR. Runs in a background isolate so the UI
+  /// thread never janks on multi-megapixel pages. Returns the original path
+  /// when preprocessing is not possible.
   Future<String> _preprocessImageForOcr(String imagePath) async {
     try {
-      final bytes = await File(imagePath).readAsBytes();
-      var image = img.decodeImage(bytes);
-      if (image == null) return imagePath;
-
-      // 1. Convert to grayscale — removes color noise entirely
-      image = img.grayscale(image);
-
-      // 2. Adaptive contrast enhancement with stronger parameters
-      //    Boosts text/background separation for scanned and photographed docs
-      image = img.adjustColor(
-        image,
-        contrast: 1.5,    // Strong contrast boost for text separation
-        brightness: 0.02,  // Minimal brightness to avoid washout
+      final outputPath = '${p.withoutExtension(imagePath)}_ocr_prep.png';
+      final ok = await Isolate.run(
+        () => preprocessOcrImageFile(imagePath, outputPath),
       );
-
-      // 3. Noise reduction — median-like smoothing via slight blur then re-sharpen
-      //    Helps with scan noise, JPEG artifacts, and speckled backgrounds
-      image = img.gaussianBlur(image, radius: 1);
-
-      // 4. Aggressive sharpening — critical for OCR on blurry/scanned documents
-      image = img.convolution(
-        image,
-        filter: [
-          -1, -1, -1,
-          -1,  9, -1,
-          -1, -1, -1,
-        ],
-        div: 1,
-        offset: 0,
-      );
-
-      // 5. Binarization — Otsu-style threshold for clean black text on white
-      //    This dramatically improves ML Kit accuracy on low-contrast documents
-      final threshold = _computeOtsuThreshold(image);
-      for (int y = 0; y < image.height; y++) {
-        for (int x = 0; x < image.width; x++) {
-          final pixel = image.getPixel(x, y);
-          final lum = img.getLuminance(pixel);
-          if (lum < threshold) {
-            image.setPixelRgb(x, y, 0, 0, 0);       // Black text
-          } else {
-            image.setPixelRgb(x, y, 255, 255, 255);  // White background
-          }
-        }
-      }
-
-      // 6. Remove thin border artifacts (common in scanned PDFs)
-      _removeBorderNoise(image, borderWidth: 3);
-
-      final outputPath = imagePath.replaceAll('.png', '_ocr_prep.png');
-      await File(outputPath).writeAsBytes(img.encodePng(image), flush: true);
-      return outputPath;
+      return ok ? outputPath : imagePath;
     } catch (_) {
       // If preprocessing fails, fall back to original image
       return imagePath;
-    }
-  }
-
-  /// Compute Otsu's threshold for binarization.
-  /// Finds the optimal threshold that minimizes intra-class variance.
-  int _computeOtsuThreshold(img.Image image) {
-    // Build histogram
-    final histogram = List<int>.filled(256, 0);
-    final totalPixels = image.width * image.height;
-
-    for (int y = 0; y < image.height; y++) {
-      for (int x = 0; x < image.width; x++) {
-        final pixel = image.getPixel(x, y);
-        final lum = img.getLuminance(pixel).toInt().clamp(0, 255);
-        histogram[lum]++;
-      }
-    }
-
-    double sumAll = 0;
-    for (int i = 0; i < 256; i++) {
-      sumAll += i * histogram[i];
-    }
-
-    double sumB = 0;
-    int wB = 0;
-    double maxVariance = 0;
-    int bestThreshold = 128;
-
-    for (int t = 0; t < 256; t++) {
-      wB += histogram[t];
-      if (wB == 0) continue;
-      final wF = totalPixels - wB;
-      if (wF == 0) break;
-
-      sumB += t * histogram[t];
-      final mB = sumB / wB;
-      final mF = (sumAll - sumB) / wF;
-      final variance = wB * wF * (mB - mF) * (mB - mF);
-
-      if (variance > maxVariance) {
-        maxVariance = variance;
-        bestThreshold = t;
-      }
-    }
-
-    return bestThreshold;
-  }
-
-  /// Remove thin border noise (black edges from scanning).
-  void _removeBorderNoise(img.Image image, {int borderWidth = 3}) {
-    for (int y = 0; y < image.height; y++) {
-      for (int x = 0; x < image.width; x++) {
-        if (x < borderWidth ||
-            x >= image.width - borderWidth ||
-            y < borderWidth ||
-            y >= image.height - borderWidth) {
-          image.setPixelRgb(x, y, 255, 255, 255);
-        }
-      }
     }
   }
 
@@ -313,8 +211,147 @@ class MlKitOcrEngine implements OcrEngine {
   }
 }
 
+/// Preprocess an image file for OCR and write the result to [outputPath].
+/// Top-level so it can run inside [Isolate.run]. Returns false on failure.
+@visibleForTesting
+bool preprocessOcrImageFile(String inputPath, String outputPath) {
+  final output = preprocessOcrImageBytes(File(inputPath).readAsBytesSync());
+  if (output == null) return false;
+  File(outputPath).writeAsBytesSync(output, flush: true);
+  return true;
+}
+
+/// Pure-Dart OCR preprocessing: luminance → percentile contrast stretch →
+/// (dark-background inversion) → adaptive local-mean binarization → border
+/// cleanup.
+///
+/// Adaptive thresholding (integral image) handles uneven lighting, shadows and
+/// yellowed paper far better than one global threshold, and flat regions stay
+/// white so speckle noise is not amplified.
+@visibleForTesting
+Uint8List? preprocessOcrImageBytes(Uint8List bytes) {
+  final img.Image? image;
+  try {
+    image = img.decodeImage(bytes);
+  } catch (_) {
+    // Truncated/garbage data can make format sniffing throw.
+    return null;
+  }
+  if (image == null) return null;
+  final width = image.width;
+  final height = image.height;
+  final total = width * height;
+  if (total == 0) return null;
+
+  // 1. Luminance plane.
+  final lum = Uint8List(total);
+  var index = 0;
+  for (final pixel in image) {
+    lum[index++] = img.getLuminance(pixel).round().clamp(0, 255).toInt();
+  }
+
+  // 2. Percentile contrast stretch (ignores 1% outliers at each end).
+  final histogram = List<int>.filled(256, 0);
+  for (var i = 0; i < total; i++) {
+    histogram[lum[i]]++;
+  }
+  final lo = _percentileLevel(histogram, total, 0.01);
+  final hi = _percentileLevel(histogram, total, 0.99);
+  if (hi - lo >= 16) {
+    final lut = Uint8List(256);
+    final range = hi - lo;
+    for (var v = 0; v < 256; v++) {
+      lut[v] = (((v - lo) * 255) / range).round().clamp(0, 255).toInt();
+    }
+    for (var i = 0; i < total; i++) {
+      lum[i] = lut[lum[i]];
+    }
+  }
+
+  // 3. Light-on-dark pages (inverted scans, dark mode screenshots) → invert.
+  var lumSum = 0;
+  for (var i = 0; i < total; i++) {
+    lumSum += lum[i];
+  }
+  if (lumSum / total < 110) {
+    for (var i = 0; i < total; i++) {
+      lum[i] = 255 - lum[i];
+    }
+  }
+
+  // 4. Integral image (Uint32 wrap-around arithmetic is safe because every
+  //    window sum is far below 2^32).
+  final stride = width + 1;
+  final integral = Uint32List(stride * (height + 1));
+  for (var y = 0; y < height; y++) {
+    var rowSum = 0;
+    final rowOffset = y * width;
+    final current = (y + 1) * stride;
+    final previous = y * stride;
+    for (var x = 0; x < width; x++) {
+      rowSum += lum[rowOffset + x];
+      integral[current + x + 1] =
+          (integral[previous + x + 1] + rowSum) & 0xFFFFFFFF;
+    }
+  }
+
+  // 5. Adaptive threshold: ink = pixel darker than 90% of its local mean.
+  final radius = (width ~/ 32) < 12 ? 12 : width ~/ 32;
+  final binary = Uint8List(total);
+  for (var y = 0; y < height; y++) {
+    final y0 = y - radius < 0 ? 0 : y - radius;
+    final y1 = y + radius + 1 > height ? height : y + radius + 1;
+    for (var x = 0; x < width; x++) {
+      final x0 = x - radius < 0 ? 0 : x - radius;
+      final x1 = x + radius + 1 > width ? width : x + radius + 1;
+      final sum = (integral[y1 * stride + x1] -
+              integral[y0 * stride + x1] -
+              integral[y1 * stride + x0] +
+              integral[y0 * stride + x0]) &
+          0xFFFFFFFF;
+      final area = (x1 - x0) * (y1 - y0);
+      final value = lum[y * width + x];
+      binary[y * width + x] = (value * area * 100 < sum * 90) ? 0 : 255;
+    }
+  }
+
+  // 6. Remove thin scanner-border artifacts.
+  const border = 3;
+  for (var y = 0; y < height; y++) {
+    final inVerticalBorder = y < border || y >= height - border;
+    for (var x = 0; x < width; x++) {
+      if (inVerticalBorder || x < border || x >= width - border) {
+        binary[y * width + x] = 255;
+      }
+    }
+  }
+
+  final output = img.Image.fromBytes(
+    width: width,
+    height: height,
+    bytes: binary.buffer,
+    numChannels: 1,
+  );
+  return Uint8List.fromList(img.encodePng(output));
+}
+
+int _percentileLevel(List<int> histogram, int total, double fraction) {
+  final target = total * fraction;
+  var cumulative = 0;
+  for (var level = 0; level < 256; level++) {
+    cumulative += histogram[level];
+    if (cumulative >= target) return level;
+  }
+  return 255;
+}
+
 /// Post-process OCR text: fix common ML Kit errors, ligatures, and typographic artifacts.
-String _postProcessOcrText(String text) {
+///
+/// Every rule is deliberately conservative: it must never delete or rewrite
+/// legitimate content such as bullets (•), ampersands, percent signs, table
+/// pipes or math symbols.
+@visibleForTesting
+String postProcessOcrText(String text) {
   var result = text;
 
   // 1. Unicode ligature fixes (common in scanned PDF fonts)
@@ -325,31 +362,72 @@ String _postProcessOcrText(String text) {
       .replaceAll('\uFB03', 'ffi')
       .replaceAll('\uFB04', 'ffl');
 
-  // 2. Fix common OCR character substitutions
+  // 2. Typographic quote artifacts (double forms first so they stay reachable).
   result = result
-      .replaceAll('|', 'I')   // Pipe often misread for capital I
-      .replaceAll('`', "'")   // Backtick for apostrophe
-      .replaceAll('``', '"')  // Double backtick for opening quote
-      .replaceAll("''", '"'); // Double apostrophe for closing quote
+      .replaceAll('``', '"')
+      .replaceAll("''", '"')
+      .replaceAll('`', "'");
 
-  // 3. Rejoin hyphenated words split across lines
+  // 3. A pipe glued to the front of a lowercase word is a misread capital I
+  //    ("|nternational"). Standalone pipes (tables) are left untouched.
   result = result.replaceAllMapped(
-    RegExp(r'(\b[a-zA-Z]{2,})-\n\s*([a-zA-Z]{2,}\b)'),
+    RegExp(r'(^|\s)\|(?=[a-z]+)', multiLine: true),
+    (m) => '${m[1]}I',
+  );
+
+  // 4. Rejoin words hyphenated across a line break (continuation must start
+  //    lowercase so "Mary-\nAnn" style names are preserved).
+  result = result.replaceAllMapped(
+    RegExp(r'([A-Za-z]{2,})-\n[ \t]*([a-z]{2,})'),
     (m) => '${m[1]}${m[2]}',
   );
 
-  // 4. Fix space before punctuation (e.g. "word ," -> "word,")
-  result = result.replaceAll(RegExp(r'\s+([,.:;?!])'), r'$1');
+  // 5. Remove stray space before , . ; — same line only, never across
+  //    newlines, and only when followed by whitespace/end of text.
+  result = result.replaceAllMapped(
+    RegExp(r'(?<=\S)[ \t]+([,.;])(?=\s|$)'),
+    (m) => m[1]!,
+  );
 
-  // 5. Remove stray single noisy characters surrounded by whitespace
-  result = result.replaceAll(RegExp(r'(?<=\s)[^\w\s\(\)\[\]\{\}\-](?=\s)'), '');
+  // 6. Drop isolated glyphs that are never meaningful on their own
+  //    (specks misread as ~ ^ _ ¬ ¦ ¨ ´ ¸ ˜). Bullets and symbols are kept.
+  result = result.replaceAll(RegExp(r'(?<=[ \t])[~^_¬¦¨´¸˜](?=[ \t])'), '');
 
-  // 6. Normalize excessive whitespace and blank lines
+  // 7. Normalize excessive whitespace and blank lines
   result = result
-      .replaceAll(RegExp(r'[ \t]{3,}'), '  ')  // Collapse excessive spaces
-      .replaceAll(RegExp(r'\n{4,}'), '\n\n\n'); // Limit blank lines
+      .replaceAll(RegExp(r'[ \t]{3,}'), '  ')
+      .replaceAll(RegExp(r'\n{4,}'), '\n\n\n');
 
   return result.trim();
+}
+
+class _PreparedPdfImage {
+  final Uint8List bytes;
+  final int width;
+  final int height;
+
+  const _PreparedPdfImage(this.bytes, this.width, this.height);
+}
+
+/// Decodes + normalizes an image for PDF embedding. Runs in a background
+/// isolate. JPEGs with normal orientation are embedded byte-for-byte (no
+/// recompression, no size blow-up); everything else is orientation-baked.
+_PreparedPdfImage? _prepareImageForPdf(Uint8List bytes) {
+  final isJpeg =
+      bytes.length > 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF;
+  final decoded = isJpeg ? img.decodeJpg(bytes) : img.decodeImage(bytes);
+  if (decoded == null) return null;
+
+  final orientation = decoded.exif.imageIfd.orientation ?? 1;
+  if (isJpeg && orientation <= 1) {
+    return _PreparedPdfImage(bytes, decoded.width, decoded.height);
+  }
+
+  final oriented = img.bakeOrientation(decoded);
+  final encoded = isJpeg
+      ? Uint8List.fromList(img.encodeJpg(oriented, quality: 95))
+      : Uint8List.fromList(img.encodePng(oriented));
+  return _PreparedPdfImage(encoded, oriented.width, oriented.height);
 }
 
 class ImageToPdfService {
@@ -364,12 +442,18 @@ class ImageToPdfService {
 
     final pdf = pw.Document();
     for (final imagePath in imagePaths) {
-      final normalizedBytes = await _readImageAsPdfCompatiblePng(imagePath);
-      final pdfImage = pw.MemoryImage(normalizedBytes);
+      final prepared = await _readImageForPdf(imagePath);
+      final pdfImage = pw.MemoryImage(prepared.bytes);
+
+      // Match the page orientation to the image so landscape photos use the
+      // full page instead of shrinking into a portrait page.
+      final pageFormat = prepared.width > prepared.height
+          ? PdfPageFormat.a4.landscape
+          : PdfPageFormat.a4;
 
       pdf.addPage(
         pw.Page(
-          pageFormat: PdfPageFormat.a4,
+          pageFormat: pageFormat,
           margin: const pw.EdgeInsets.all(24),
           build: (_) => pw.Center(
             child: pw.Image(pdfImage, fit: pw.BoxFit.contain),
@@ -386,21 +470,60 @@ class ImageToPdfService {
     return outputPath;
   }
 
-  Future<Uint8List> _readImageAsPdfCompatiblePng(String imagePath) async {
+  Future<_PreparedPdfImage> _readImageForPdf(String imagePath) async {
     final file = File(imagePath);
     if (!await file.exists()) {
       throw ConversionException('Image not found: ${p.basename(imagePath)}');
     }
 
     final bytes = await file.readAsBytes();
-    final decoded = img.decodeImage(bytes);
-    if (decoded == null) {
+    _PreparedPdfImage? prepared;
+    try {
+      prepared = await Isolate.run(() => _prepareImageForPdf(bytes));
+    } catch (_) {
+      prepared = null;
+    }
+    if (prepared == null) {
       throw ConversionException(
           'Unsupported or corrupted image: ${p.basename(imagePath)}');
     }
+    return prepared;
+  }
+}
 
-    final oriented = img.bakeOrientation(decoded);
-    return img.encodePng(oriented);
+class _RenderSize {
+  final double width;
+  final double height;
+
+  const _RenderSize(this.width, this.height);
+}
+
+/// Render size for a page at [dpi], clamped so the longest side never exceeds
+/// [maxDimension] pixels. Prevents out-of-memory crashes on poster-sized PDFs.
+_RenderSize _renderSizeForDpi(
+  double widthPoints,
+  double heightPoints,
+  double dpi, {
+  double maxDimension = 4096,
+}) {
+  final scale = dpi / 72;
+  var width = widthPoints * scale;
+  var height = heightPoints * scale;
+  final longest = width > height ? width : height;
+  if (longest > maxDimension) {
+    final factor = maxDimension / longest;
+    width *= factor;
+    height *= factor;
+  }
+  return _RenderSize(width.roundToDouble(), height.roundToDouble());
+}
+
+Future<pdfx.PdfDocument> _openPdfForRendering(String pdfPath) async {
+  try {
+    return await pdfx.PdfDocument.openFile(pdfPath);
+  } catch (_) {
+    throw ConversionException(
+        'Could not open ${p.basename(pdfPath)}. It may be corrupted or password-protected.');
   }
 }
 
@@ -419,7 +542,7 @@ class PdfToImageService {
       throw ConversionException('PDF not found: ${p.basename(pdfPath)}');
     }
 
-    final document = await pdfx.PdfDocument.openFile(pdfPath);
+    final document = await _openPdfForRendering(pdfPath);
     try {
       final pageCount = document.pagesCount;
       final baseName = p.basenameWithoutExtension(pdfPath);
@@ -428,9 +551,15 @@ class PdfToImageService {
       for (var i = 1; i <= pageCount; i++) {
         final page = await document.getPage(i);
         try {
+          final size = _renderSizeForDpi(
+            page.width,
+            page.height,
+            dpi,
+            maxDimension: 6000,
+          );
           final rendered = await page.render(
-            width: page.width * (dpi / 72),
-            height: page.height * (dpi / 72),
+            width: size.width,
+            height: size.height,
             format: pdfx.PdfPageImageFormat.png,
             backgroundColor: '#FFFFFF',
           );
@@ -465,6 +594,7 @@ class PdfToDocxService {
   final FileStorageService _storage;
   final OcrEngineFactory _ocrEngineFactory;
   final OcrPageImageFactory _ocrPageImageFactory;
+  final bool _sharedOcrRenderer;
   final PdfVisualPageFactory _visualPageFactory;
   final double ocrDpi;
   final double visualDpi;
@@ -485,6 +615,9 @@ class PdfToDocxService {
     this.minTextCharactersBeforeOcr = 12,
   })  : _ocrEngineFactory = ocrEngineFactory ?? (() => MlKitOcrEngine()),
         _ocrPageImageFactory = ocrPageImageFactory ?? _renderPdfPageForOcr,
+        // When no custom renderer is injected, share ONE open PDF document
+        // across all OCR pages instead of re-parsing the file per page.
+        _sharedOcrRenderer = ocrPageImageFactory == null,
         _visualPageFactory = visualPageFactory ?? _renderPdfPagesForDocx;
 
   Future<String> convert(
@@ -507,15 +640,7 @@ class PdfToDocxService {
       onProgress?.call(i + 1, pageCount, PdfToDocxStage.extractingText);
     }
 
-    // Render visual pages for fallback image-based output
-    final renderedPages =
-        await _visualPageFactory(pdfPath, visualDpi, onProgress);
-    if (renderedPages.length != pageCount) {
-      throw const ConversionException(
-          'Could not preserve every PDF page for DOCX output.');
-    }
-
-    // OCR pass: always render at ocrDpi (300) for maximum accuracy
+    // OCR pass: only for pages whose embedded text is missing/weak.
     final ocrTextByPage = <int, String>{};
     final pagesNeedingOcr = <int>[];
     for (var i = 0; i < pageCount; i++) {
@@ -527,18 +652,28 @@ class PdfToDocxService {
     if (pagesNeedingOcr.isNotEmpty) {
       final tempDir = await Directory.systemTemp.createTemp('ffc_ocr_');
       final ocrEngine = _ocrEngineFactory();
+      _OcrRenderSession? session;
       try {
+        if (_sharedOcrRenderer) {
+          session = await _OcrRenderSession.open(pdfPath);
+        }
         for (final pageIndex in pagesNeedingOcr) {
           final pageNumber = pageIndex + 1;
           // Always render a fresh high-DPI image for OCR instead of reusing
           // the lower-DPI visual snapshots. This is the key accuracy fix.
-          final imagePath = await _ocrPageImageFactory(
-            pdfPath,
-            pageNumber,
-            tempDir,
-            ocrDpi,
-          );
+          final imagePath = session != null
+              ? await session.render(pageNumber, tempDir, ocrDpi)
+              : await _ocrPageImageFactory(
+                  pdfPath,
+                  pageNumber,
+                  tempDir,
+                  ocrDpi,
+                );
           ocrTextByPage[pageIndex] = await ocrEngine.recognizeText(imagePath);
+          // Free disk as we go; scanned books can be hundreds of pages.
+          try {
+            await File(imagePath).delete();
+          } catch (_) {}
           onProgress?.call(
             pageNumber,
             pageCount,
@@ -546,6 +681,7 @@ class PdfToDocxService {
           );
         }
       } finally {
+        await session?.close();
         await ocrEngine.close();
         if (await tempDir.exists()) {
           await tempDir.delete(recursive: true);
@@ -559,23 +695,27 @@ class PdfToDocxService {
       ocrTextByPage,
     );
 
-    // Build searchable text for alt-text / accessibility
-    final searchableTextByPage = _buildBestSearchableTextByPage(
-      embeddedTextByPage,
-      ocrTextByPage,
-    );
-    final visualPages = List<PdfPageSnapshot>.generate(
-        renderedPages.length,
-        (i) =>
-            renderedPages[i].copyWithSearchableText(searchableTextByPage[i]));
-
-    // Build editable text DOCX whenever paragraphs are found, or fall back to visual pages
     Uint8List docxBytes;
     if (paragraphs.isNotEmpty) {
       // Editable DOCX — real text paragraphs that users can edit in Word
       docxBytes = _buildDocx(paragraphs);
     } else {
-      // Image-based DOCX — fallback visual fidelity for pure graphical/diagram pages
+      // No text anywhere (diagram / photo-only PDF): preserve the pages as
+      // images. Rendering is lazy — text PDFs never pay for it.
+      final renderedPages =
+          await _visualPageFactory(pdfPath, visualDpi, onProgress);
+      if (renderedPages.length != pageCount) {
+        throw const ConversionException(
+            'Could not preserve every PDF page for DOCX output.');
+      }
+      final searchableTextByPage = _buildBestSearchableTextByPage(
+        embeddedTextByPage,
+        ocrTextByPage,
+      );
+      final visualPages = List<PdfPageSnapshot>.generate(
+          renderedPages.length,
+          (i) => renderedPages[i]
+              .copyWithSearchableText(searchableTextByPage[i]));
       docxBytes = _buildDocx([], visualPages: visualPages);
     }
 
@@ -602,8 +742,25 @@ class DocxToPdfService {
     }
 
     final docxBytes = await file.readAsBytes();
-    final imagePages = _extractDocxImagePages(docxBytes);
-    if (imagePages.isNotEmpty) {
+    final baseName = p.basenameWithoutExtension(docxPath);
+
+    // Visible (non-hidden) paragraphs decide the path: a DOCX with real text
+    // must never be reduced to just its images (logos, figures, ...).
+    List<String> paragraphs;
+    List<_DocxImagePage> imagePages;
+    try {
+      paragraphs = await _extractDocxParagraphs(docxBytes);
+      imagePages =
+          paragraphs.isEmpty ? _extractDocxImagePages(docxBytes) : const [];
+    } on ConversionException {
+      rethrow;
+    } catch (_) {
+      throw const ConversionException(
+          'This file is not a valid DOCX document.');
+    }
+
+    if (paragraphs.isEmpty && imagePages.isNotEmpty) {
+      // Image-only DOCX (e.g. produced from a scanned PDF): one page per image.
       final pdf = pw.Document();
       for (final page in imagePages) {
         final pdfImage = pw.MemoryImage(page.bytes);
@@ -618,43 +775,29 @@ class DocxToPdfService {
         );
       }
 
-      final baseName = p.basenameWithoutExtension(docxPath);
       final outputPath = await _storage.buildOutputPath(baseName, 'pdf');
       await _storage.writeBytes(outputPath, await pdf.save());
       return outputPath;
     }
 
-    final paragraphs = await _extractDocxParagraphs(docxBytes);
     if (paragraphs.isEmpty) {
       throw const ConversionException(
           'No readable text was found in this DOCX.');
     }
 
+    final font = await _loadPdfFonts();
     final pdf = pw.Document();
-    final baseName = p.basenameWithoutExtension(docxPath);
-    final theme = pw.ThemeData.withFont(
-      base: pw.Font.helvetica(),
-      bold: pw.Font.helveticaBold(),
-      italic: pw.Font.helveticaOblique(),
-      boldItalic: pw.Font.helveticaBoldOblique(),
-    );
-
     pdf.addPage(
       pw.MultiPage(
         pageFormat: PdfPageFormat.a4,
         margin: const pw.EdgeInsets.all(36),
-        theme: theme,
+        theme: font.theme,
         build: (_) => [
-          pw.Text(
-            baseName,
-            style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold),
-          ),
-          pw.SizedBox(height: 18),
           ...paragraphs.map(
             (text) => pw.Padding(
               padding: const pw.EdgeInsets.only(bottom: 8),
               child: pw.Text(
-                text,
+                _sanitizeForPdfText(text, unicode: font.unicode),
                 style: const pw.TextStyle(fontSize: 11, lineSpacing: 3),
               ),
             ),
@@ -669,43 +812,110 @@ class DocxToPdfService {
   }
 }
 
+class _PdfFonts {
+  final pw.ThemeData theme;
+  final bool unicode;
+
+  const _PdfFonts(this.theme, {required this.unicode});
+}
+
+/// Loads the bundled Noto Sans family (full Latin/Greek/Cyrillic coverage,
+/// curly quotes, bullets, accents). Falls back to built-in Helvetica when the
+/// assets are unavailable, in which case text is sanitized to Latin-1.
+Future<_PdfFonts> _loadPdfFonts() async {
+  try {
+    Future<pw.Font> load(String name) async =>
+        pw.Font.ttf(await rootBundle.load('assets/fonts/$name'));
+    final theme = pw.ThemeData.withFont(
+      base: await load('NotoSans-Regular.ttf'),
+      bold: await load('NotoSans-Bold.ttf'),
+      italic: await load('NotoSans-Italic.ttf'),
+      boldItalic: await load('NotoSans-BoldItalic.ttf'),
+    );
+    return _PdfFonts(theme, unicode: true);
+  } catch (_) {
+    return _PdfFonts(
+      pw.ThemeData.withFont(
+        base: pw.Font.helvetica(),
+        bold: pw.Font.helveticaBold(),
+        italic: pw.Font.helveticaOblique(),
+        boldItalic: pw.Font.helveticaBoldOblique(),
+      ),
+      unicode: false,
+    );
+  }
+}
+
+/// Makes text safe for the PDF writer: tabs → spaces, control chars removed,
+/// and (for the Helvetica fallback) smart punctuation mapped to ASCII with
+/// unsupported glyphs replaced by '?'.
+@visibleForTesting
+String sanitizeForPdfText(String text, {required bool unicode}) =>
+    _sanitizeForPdfText(text, unicode: unicode);
+
+String _sanitizeForPdfText(String text, {required bool unicode}) {
+  var result = text
+      .replaceAll('\t', '    ')
+      .replaceAll(RegExp(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'), '');
+  if (unicode) return result;
+
+  result = result
+      .replaceAll(RegExp('[\u2018\u2019\u201A\u2032]'), "'")
+      .replaceAll(RegExp('[\u201C\u201D\u201E\u2033]'), '"')
+      .replaceAll(RegExp('[\u2013\u2014\u2212]'), '-')
+      .replaceAll('\u2026', '...')
+      .replaceAll('\u2022', '*')
+      .replaceAll('\u00A0', ' ');
+  return String.fromCharCodes(
+    result.runes.map((r) => r > 255 ? 0x3F : r),
+  );
+}
+
 List<String> _extractEmbeddedTextByPage(List<int> inputBytes) {
-  final source = sf.PdfDocument(inputBytes: inputBytes);
+  final sf.PdfDocument source;
+  try {
+    source = sf.PdfDocument(inputBytes: inputBytes);
+  } catch (e) {
+    final message = e.toString().toLowerCase();
+    if (message.contains('password') || message.contains('encrypt')) {
+      throw const ConversionException(
+          'This PDF is password-protected. Remove the password and try again.');
+    }
+    throw const ConversionException(
+        'This PDF could not be read. The file may be corrupted.');
+  }
   try {
     final extractor = sf.PdfTextExtractor(source);
     return List.generate(source.pages.count, (i) {
-      return extractor.extractText(startPageIndex: i, endPageIndex: i).trim();
+      try {
+        return extractor.extractText(startPageIndex: i, endPageIndex: i).trim();
+      } catch (_) {
+        // Unusual fonts/encodings can break extraction for a single page;
+        // returning '' lets the OCR pass recover that page.
+        return '';
+      }
     });
   } finally {
     source.dispose();
   }
 }
 
-Future<String> _renderPdfPageForOcr(
-  String pdfPath,
-  int pageNumber,
-  Directory tempDir,
-  double dpi,
-) async {
-  final document = await pdfx.PdfDocument.openFile(pdfPath);
-  try {
-    final page = await document.getPage(pageNumber);
-    try {
-      final scale = dpi / 72;
-      // Clamp max pixel dimension to 4096px to avoid OOM on large pages
-      final rawWidth = page.width * scale;
-      final rawHeight = page.height * scale;
-      const maxDim = 4096.0;
-      final scaleFactor =
-          (rawWidth > maxDim || rawHeight > maxDim)
-              ? maxDim / (rawWidth > rawHeight ? rawWidth : rawHeight)
-              : 1.0;
-      final targetWidth = rawWidth * scaleFactor;
-      final targetHeight = rawHeight * scaleFactor;
+/// One open PDF document reused for every OCR page render.
+class _OcrRenderSession {
+  _OcrRenderSession._(this._document);
 
+  final pdfx.PdfDocument _document;
+
+  static Future<_OcrRenderSession> open(String pdfPath) async =>
+      _OcrRenderSession._(await _openPdfForRendering(pdfPath));
+
+  Future<String> render(int pageNumber, Directory tempDir, double dpi) async {
+    final page = await _document.getPage(pageNumber);
+    try {
+      final size = _renderSizeForDpi(page.width, page.height, dpi);
       final rendered = await page.render(
-        width: targetWidth,
-        height: targetHeight,
+        width: size.width,
+        height: size.height,
         format: pdfx.PdfPageImageFormat.png,
         backgroundColor: '#FFFFFF',
       );
@@ -721,8 +931,22 @@ Future<String> _renderPdfPageForOcr(
     } finally {
       await page.close();
     }
+  }
+
+  Future<void> close() => _document.close();
+}
+
+Future<String> _renderPdfPageForOcr(
+  String pdfPath,
+  int pageNumber,
+  Directory tempDir,
+  double dpi,
+) async {
+  final session = await _OcrRenderSession.open(pdfPath);
+  try {
+    return await session.render(pageNumber, tempDir, dpi);
   } finally {
-    await document.close();
+    await session.close();
   }
 }
 
@@ -731,17 +955,17 @@ Future<List<PdfPageSnapshot>> _renderPdfPagesForDocx(
   double dpi,
   PdfToDocxProgress? onProgress,
 ) async {
-  final document = await pdfx.PdfDocument.openFile(pdfPath);
+  final document = await _openPdfForRendering(pdfPath);
   try {
     final pageCount = document.pagesCount;
     final snapshots = <PdfPageSnapshot>[];
-    final scale = dpi / 72;
 
     for (var i = 1; i <= pageCount; i++) {
       final page = await document.getPage(i);
       try {
-        final targetWidth = page.width * scale;
-        final targetHeight = page.height * scale;
+        final size = _renderSizeForDpi(page.width, page.height, dpi);
+        final targetWidth = size.width;
+        final targetHeight = size.height;
         final rendered = await page.render(
           width: targetWidth,
           height: targetHeight,
@@ -776,26 +1000,11 @@ Future<List<PdfPageSnapshot>> _renderPdfPagesForDocx(
   }
 }
 
-List<String> _buildBestParagraphsByPage(
+List<List<String>> _chosenParagraphsByPage(
   List<String> embeddedTextByPage,
   Map<int, String> ocrTextByPage,
 ) {
-  final searchableTextByPage =
-      _buildBestSearchableTextByPage(embeddedTextByPage, ocrTextByPage);
-
-  return searchableTextByPage
-      .expand((pageText) => _splitPdfTextIntoParagraphs(pageText)
-          .where((line) => line.isNotEmpty))
-      .toList();
-}
-
-List<String> _buildBestSearchableTextByPage(
-  List<String> embeddedTextByPage,
-  Map<int, String> ocrTextByPage,
-) {
-  final pages = <String>[];
-
-  for (var i = 0; i < embeddedTextByPage.length; i++) {
+  return List.generate(embeddedTextByPage.length, (i) {
     final embeddedParagraphs =
         _splitPdfTextIntoParagraphs(embeddedTextByPage[i])
             .where((line) => line.isNotEmpty)
@@ -803,14 +1012,43 @@ List<String> _buildBestSearchableTextByPage(
     final ocrParagraphs = _splitPdfTextIntoParagraphs(ocrTextByPage[i] ?? '')
         .where((line) => line.isNotEmpty)
         .toList();
+    return _chooseBestParagraphs(embeddedParagraphs, ocrParagraphs);
+  });
+}
 
-    final chosen = _chooseBestParagraphs(embeddedParagraphs, ocrParagraphs);
-    pages.add(chosen.isEmpty
-        ? 'Page ${i + 1}: no readable text found.'
-        : chosen.join('\n'));
+/// Real document paragraphs only — never placeholder text. Returns an empty
+/// list when NO page has text so the caller can switch to the visual (image)
+/// fallback. In a mixed document, text-less pages get a short bracketed note
+/// so a missing diagram page is never silently dropped.
+List<String> _buildBestParagraphsByPage(
+  List<String> embeddedTextByPage,
+  Map<int, String> ocrTextByPage,
+) {
+  final chosenByPage =
+      _chosenParagraphsByPage(embeddedTextByPage, ocrTextByPage);
+  if (chosenByPage.every((page) => page.isEmpty)) return const [];
+
+  final paragraphs = <String>[];
+  for (var i = 0; i < chosenByPage.length; i++) {
+    if (chosenByPage[i].isEmpty) {
+      paragraphs.add('[Page ${i + 1} contains no extractable text — it may be '
+          'an image or blank page.]');
+    } else {
+      paragraphs.addAll(chosenByPage[i]);
+    }
   }
+  return paragraphs;
+}
 
-  return pages;
+/// Per-page plain text used for DOCX alt-text / hidden searchable text.
+/// Empty string (not a placeholder) for pages without text.
+List<String> _buildBestSearchableTextByPage(
+  List<String> embeddedTextByPage,
+  Map<int, String> ocrTextByPage,
+) {
+  return _chosenParagraphsByPage(embeddedTextByPage, ocrTextByPage)
+      .map((page) => page.join('\n'))
+      .toList();
 }
 
 List<String> _chooseBestParagraphs(
@@ -924,6 +1162,9 @@ Iterable<String> _splitPdfTextIntoParagraphs(String text) {
       .map((paragraph) => paragraph.replaceAll(RegExp(r'[ \t]+'), ' ').trim());
 }
 
+/// Extracts the VISIBLE paragraphs of a DOCX. Runs marked `w:vanish` (hidden
+/// text, e.g. the searchable text we embed behind preserved page images) are
+/// skipped so they never show up as real content.
 Future<List<String>> _extractDocxParagraphs(List<int> bytes) async {
   final archive = ZipDecoder().decodeBytes(bytes, verify: true);
   final documentFile = archive.findFile('word/document.xml');
@@ -939,9 +1180,14 @@ Future<List<String>> _extractDocxParagraphs(List<int> bytes) async {
   for (final paragraph in document.findAllElements('p', namespace: '*')) {
     final parts = <String>[];
     for (final child in paragraph.descendants.whereType<XmlElement>()) {
-      if (child.name.local == 't' || child.name.local == 'tab') {
-        parts.add(child.name.local == 'tab' ? '\t' : child.innerText);
-      } else if (child.name.local == 'br') {
+      final name = child.name.local;
+      if (name != 't' && name != 'tab' && name != 'br') continue;
+      if (_isInHiddenRun(child)) continue;
+      if (name == 't') {
+        parts.add(child.innerText);
+      } else if (name == 'tab') {
+        parts.add('\t');
+      } else {
         parts.add('\n');
       }
     }
@@ -952,6 +1198,23 @@ Future<List<String>> _extractDocxParagraphs(List<int> bytes) async {
   }
 
   return paragraphs;
+}
+
+bool _isInHiddenRun(XmlElement element) {
+  XmlNode? node = element.parent;
+  while (node is XmlElement) {
+    if (node.name.local == 'r') {
+      for (final props in node.findElements('rPr', namespace: '*')) {
+        for (final vanish in props.findElements('vanish', namespace: '*')) {
+          final value = _xmlAttribute(vanish, 'val');
+          if (value == null || (value != '0' && value != 'false')) return true;
+        }
+      }
+      return false;
+    }
+    node = node.parent;
+  }
+  return false;
 }
 
 List<_DocxImagePage> _extractDocxImagePages(List<int> bytes) {
