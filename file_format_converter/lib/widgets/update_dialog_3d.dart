@@ -71,6 +71,7 @@ class _UpdateDialog3DState extends State<UpdateDialog3D>
 
     final path = await _service.downloadApk(
       widget.updateInfo.downloadUrl,
+      expectedSha256: widget.updateInfo.apkSha256,
       onProgress: (p, received, total) {
         if (mounted) {
           setState(() {

@@ -5,7 +5,7 @@ import 'db_manager.dart';
 import 'db_provider.dart';
 import 'failover_event.dart';
 import 'multi_db_config.dart';
-import 'datasources/supabase_datasource.dart';
+import 'datasources/aws_dynamodb_datasource.dart';
 import 'datasources/cloudflare_d1_datasource.dart';
 import 'datasources/appwrite_datasource.dart';
 
@@ -40,7 +40,7 @@ final databaseManagerProvider = Provider<DatabaseManager>((ref) {
 
   return DatabaseManager.create(
     prefs: prefs,
-    supabaseRepo: SupabaseUserDeviceRepository(),
+    awsRepo: AwsDynamoDbUserDeviceRepository(),
     cloudflareRepo: d1Repo,
     appwriteRepo: appwriteRepo,
   );

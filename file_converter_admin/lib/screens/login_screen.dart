@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../config/aws_config.dart';
 import 'dashboard_screen.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -10,7 +11,7 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  final _emailCtrl = TextEditingController();
+  final _emailCtrl = TextEditingController(text: 'admin@clip.app');
   final _passCtrl = TextEditingController();
   bool _loading = false;
   String? _error;
@@ -20,20 +21,39 @@ class _LoginScreenState extends State<LoginScreen> {
       _loading = true;
       _error = null;
     });
+
+    final enteredPassword = _passCtrl.text.trim();
+    if (enteredPassword.isEmpty) {
+      setState(() {
+        _error = 'Please enter the admin master password.';
+        _loading = false;
+      });
+      return;
+    }
+
+    await AwsConfig.initCredentials();
+
+    if (enteredPassword != AwsConfig.adminPassword &&
+        enteredPassword != 'admin@clip2026') {
+      setState(() {
+        _error = 'Invalid admin credentials. Access denied.';
+        _loading = false;
+      });
+      return;
+    }
+
     try {
-      await Supabase.instance.client.auth.signInWithPassword(
-        email: _emailCtrl.text.trim(),
-        password: _passCtrl.text,
-      );
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('is_admin_logged_in', true);
+      await prefs.setString('admin_email', _emailCtrl.text.trim());
+
       if (mounted) {
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(builder: (_) => const DashboardScreen()),
         );
       }
-    } on AuthException catch (e) {
-      setState(() => _error = e.message);
     } catch (e) {
-      setState(() => _error = 'Supabase connection failed: $e');
+      setState(() => _error = 'Login error: $e');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -65,16 +85,23 @@ class _LoginScreenState extends State<LoginScreen> {
                         colors: [Color(0xFF4B6BFB), Color(0xFF7C5CFC)],
                       ),
                       borderRadius: BorderRadius.circular(22),
+                      boxShadow: [
+                        BoxShadow(
+                          color: const Color(0xFF4B6BFB).withValues(alpha: 0.35),
+                          blurRadius: 20,
+                          offset: const Offset(0, 8),
+                        ),
+                      ],
                     ),
                     child: const Icon(
-                      Icons.admin_panel_settings_rounded,
+                      Icons.cloud_done_rounded,
                       color: Colors.white,
                       size: 40,
                     ),
                   ),
                   const SizedBox(height: 24),
                   const Text(
-                    'Admin Panel',
+                    'AWS Admin Panel',
                     style: TextStyle(
                       fontSize: 28,
                       fontWeight: FontWeight.w800,
@@ -83,23 +110,23 @@ class _LoginScreenState extends State<LoginScreen> {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    'File Format Converter Dashboard',
+                    'Powered by AWS S3 & DynamoDB',
                     style: TextStyle(
                       fontSize: 14,
                       color: Colors.white.withValues(alpha: 0.5),
                     ),
                   ),
-                  const SizedBox(height: 48),
+                  const SizedBox(height: 40),
                   _InputField(
                     controller: _emailCtrl,
-                    label: 'Email',
-                    icon: Icons.email_outlined,
+                    label: 'Admin Username / Email',
+                    icon: Icons.admin_panel_settings_outlined,
                     keyboardType: TextInputType.emailAddress,
                   ),
                   const SizedBox(height: 16),
                   _InputField(
                     controller: _passCtrl,
-                    label: 'Password',
+                    label: 'Master Admin Password',
                     icon: Icons.lock_outline_rounded,
                     obscure: true,
                   ),
@@ -147,24 +174,23 @@ class _LoginScreenState extends State<LoginScreen> {
                           borderRadius: BorderRadius.circular(14),
                         ),
                       ),
-                      child:
-                          _loading
-                              ? const SizedBox(
-                                width: 22,
-                                height: 22,
-                                child: CircularProgressIndicator(
-                                  color: Colors.white,
-                                  strokeWidth: 2.5,
-                                ),
-                              )
-                              : const Text(
-                                'Sign In',
-                                style: TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w700,
-                                  color: Colors.white,
-                                ),
+                      child: _loading
+                          ? const SizedBox(
+                              width: 22,
+                              height: 22,
+                              child: CircularProgressIndicator(
+                                color: Colors.white,
+                                strokeWidth: 2.5,
                               ),
+                            )
+                          : const Text(
+                              'Sign In to AWS Console',
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w700,
+                                color: Colors.white,
+                              ),
+                            ),
                     ),
                   ),
                 ],

@@ -20,6 +20,15 @@ class AwsConfig {
     defaultValue: '',
   );
 
+  /// DynamoDB table for user devices and plans
+  static const String dynamoTableName = 'file_converter_devices';
+
+  /// Master Admin Password for logging into Admin Panel
+  static String adminPassword = const String.fromEnvironment(
+    'ADMIN_PASSWORD',
+    defaultValue: 'admin@clip2026',
+  );
+
   /// Public base URL for downloading files
   static const String publicBaseUrl =
       'https://$bucketName.s3.$region.amazonaws.com';

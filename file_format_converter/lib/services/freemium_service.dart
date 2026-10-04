@@ -3,8 +3,8 @@ import '../core/constants/app_constants.dart';
 
 /// Manages free quotas, rewarded-ad boosts, and Pro state.
 ///
-/// Usage is scoped to the signed-in Supabase user when one is available. This
-/// prevents a logout/login cycle from resetting the daily free conversion count.
+/// Usage is scoped to the device account when one is available. This
+/// prevents a reset of the daily free conversion count.
 class FreemiumService {
   final SharedPreferences _prefs;
   String? _accountId;

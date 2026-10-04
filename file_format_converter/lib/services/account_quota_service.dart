@@ -1,4 +1,4 @@
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'analytics_service.dart';
 import '../core/database/db_manager.dart';
 
 class AccountQuotaSnapshot {
@@ -11,18 +11,14 @@ class AccountQuotaSnapshot {
   });
 }
 
-/// Stores per-account daily quota counters using the multi-database backend.
-///
-/// Previously wrote directly to Supabase. Now delegates to [DatabaseManager]
-/// which automatically fails over to Cloudflare D1 → Appwrite. All existing
-/// call sites are unchanged — [userId] resolves internally from Supabase auth.
+/// Stores per-device daily quota counters using the multi-database backend.
 class AccountQuotaService {
   final DatabaseManager _db;
 
   AccountQuotaService({required DatabaseManager db}) : _db = db;
 
-  /// Current signed-in user ID (same Supabase auth source as before).
-  String? get _userId => Supabase.instance.client.auth.currentUser?.id;
+  /// Current device ID (device-keyed row for quotas in AWS DynamoDB).
+  String? get _userId => AnalyticsService().deviceId;
 
   // ── Public API ───────────────────────────────────────────────────────────────
 

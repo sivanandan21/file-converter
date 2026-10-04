@@ -26,7 +26,7 @@ class FailoverEvent {
         timestamp: DateTime.parse(json['timestamp'] as String),
         from: DbProvider.values
             .firstWhere((p) => p.label == json['from'],
-                orElse: () => DbProvider.supabase),
+                orElse: () => DbProvider.awsDynamoDb),
         to: DbProvider.values
             .firstWhere((p) => p.label == json['to'],
                 orElse: () => DbProvider.cloudflareD1),

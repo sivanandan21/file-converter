@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS user_devices (
 CREATE INDEX IF NOT EXISTS idx_user_devices_plan ON user_devices(plan);
 CREATE INDEX IF NOT EXISTS idx_user_devices_last_seen ON user_devices(last_seen);
 
--- Failover log table (same schema as Supabase)
+-- Failover log table
 CREATE TABLE IF NOT EXISTS failover_log (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp         TEXT NOT NULL,

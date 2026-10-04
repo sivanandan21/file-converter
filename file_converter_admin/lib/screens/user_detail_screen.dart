@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import '../services/aws_dynamodb_service.dart';
 
 class UserDetailScreen extends StatefulWidget {
   final Map<String, dynamic> data;
@@ -13,6 +13,7 @@ class UserDetailScreen extends StatefulWidget {
 class _UserDetailScreenState extends State<UserDetailScreen> {
   late Map<String, dynamic> _data;
   String? _selectedPlan;
+  final _dynamo = AwsDynamoDbService();
 
   static const _plans = ['free', 'premium', 'lifetime'];
   static const _planColors = {
@@ -47,26 +48,18 @@ class _UserDetailScreenState extends State<UserDetailScreen> {
 
   Future<void> _savePlan() async {
     try {
-      await Supabase.instance.client
-          .from('user_devices')
-          .update({
-            'plan': _selectedPlan,
-            'plan_updated_at': DateTime.now().toUtc().toIso8601String(),
-          })
-          .eq('device_id', _data['device_id']);
+      await _dynamo.updateDevicePlan(_data['device_id'], _selectedPlan ?? 'free');
       if (mounted) {
         setState(() => _data['plan'] = _selectedPlan);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Plan updated to ${_selectedPlan!.toUpperCase()}'),
+            content: Text('Plan updated to ${_selectedPlan!.toUpperCase()} in AWS'),
             backgroundColor: _planColor,
           ),
         );
       }
-    } on PostgrestException catch (e) {
-      _showSaveError(e.message);
     } catch (e) {
-      _showSaveError('Supabase connection failed: $e');
+      _showSaveError('AWS DynamoDB update failed: $e');
     }
   }
 
@@ -501,11 +494,13 @@ class _UserDetailScreenState extends State<UserDetailScreen> {
     
     if (confirmed == true) {
       try {
-        await Supabase.instance.client.from('user_devices').update({'force_logout': true}).eq('device_id', _data['device_id']);
+        await _dynamo.setForceLogout(_data['device_id'], true);
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Logout signal sent!')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('AWS logout signal sent to device!')),
+        );
       } catch (e) {
-        _showSaveError('Failed to send logout signal.');
+        _showSaveError('Failed to send AWS logout signal: $e');
       }
     }
   }
@@ -516,7 +511,7 @@ class _UserDetailScreenState extends State<UserDetailScreen> {
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF111827),
         title: const Text('Reset Quotas', style: TextStyle(color: Colors.white)),
-        content: const Text('This will reset their free conversions and rewarded ad views for today. Proceed?', style: TextStyle(color: Colors.white70)),
+        content: const Text('This will reset their daily conversions in AWS. Proceed?', style: TextStyle(color: Colors.white70)),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
           TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Reset', style: TextStyle(color: Colors.green))),
@@ -526,12 +521,13 @@ class _UserDetailScreenState extends State<UserDetailScreen> {
     
     if (confirmed == true) {
       try {
-        final userId = _data['device_id']; // This is their Google ID now
-        await Supabase.instance.client.from('user_devices').delete().inFilter('device_id', ['quota:conversion:$userId', 'quota:rewarded_ad:$userId']);
+        await _dynamo.resetQuotas(_data['device_id']);
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Quotas reset successfully!')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('AWS quotas reset successfully!')),
+        );
       } catch (e) {
-        _showSaveError('Failed to reset quotas.');
+        _showSaveError('Failed to reset AWS quotas: $e');
       }
     }
   }

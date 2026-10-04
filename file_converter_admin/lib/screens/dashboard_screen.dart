@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../services/aws_dynamodb_service.dart';
 import 'user_detail_screen.dart';
 import 'login_screen.dart';
 import 'app_release_screen.dart';
@@ -18,7 +20,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   List<Map<String, dynamic>> _users = [];
   bool _loading = true;
   String? _error;
-  RealtimeChannel? _channel;
+  Timer? _refreshTimer;
+  final _dynamo = AwsDynamoDbService();
 
   static const _planColors = {
     'free': Color(0xFF64748B),
@@ -44,7 +47,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void initState() {
     super.initState();
     _loadUsers();
-    _subscribeRealtime();
+    // Auto-refresh every 20 seconds from DynamoDB
+    _refreshTimer = Timer.periodic(const Duration(seconds: 20), (_) {
+      if (mounted) _loadUsers();
+    });
   }
 
   Future<void> _loadUsers() async {
@@ -54,23 +60,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
     });
 
     try {
-      final res = await Supabase.instance.client
-          .from('user_devices')
-          .select()
-          .order('last_seen', ascending: false);
+      final items = await _dynamo.scanDevices();
       if (mounted) {
         setState(() {
-          _users =
-              List<Map<String, dynamic>>.from(
-                res,
-              ).where((row) => !_isInternalQuotaRow(row)).toList();
+          _users = items.where((row) => !_isInternalQuotaRow(row)).toList();
           _loading = false;
         });
       }
-    } on PostgrestException catch (e) {
-      _showLoadError(e.message);
     } catch (e) {
-      _showLoadError(e.toString());
+      _showLoadError('AWS DynamoDB query error: $e');
     }
   }
 
@@ -82,25 +80,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     });
   }
 
-  void _subscribeRealtime() {
-    _channel =
-        Supabase.instance.client
-            .channel('user_devices_changes')
-            .onPostgresChanges(
-              event: PostgresChangeEvent.all,
-              schema: 'public',
-              table: 'user_devices',
-              callback: (_) => _loadUsers(),
-            )
-            .subscribe();
-  }
-
   @override
   void dispose() {
-    final channel = _channel;
-    if (channel != null) {
-      Supabase.instance.client.removeChannel(channel);
-    }
+    _refreshTimer?.cancel();
     super.dispose();
   }
 
@@ -193,7 +175,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
           IconButton(
             icon: const Icon(Icons.logout_rounded, color: Color(0xFF64748B)),
             onPressed: () async {
-              await Supabase.instance.client.auth.signOut();
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.remove('is_admin_logged_in');
               if (!context.mounted) return;
               Navigator.of(context).pushReplacement(
                 MaterialPageRoute(builder: (_) => const LoginScreen()),
@@ -508,7 +491,7 @@ class _DashboardError extends StatelessWidget {
             ),
             const SizedBox(height: 14),
             const Text(
-              'Supabase connection failed',
+              'AWS DynamoDB connection failed',
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: Colors.white,

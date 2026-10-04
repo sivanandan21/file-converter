@@ -13,6 +13,7 @@ class AppReleaseInfo {
   final String releaseNotes;
   final bool forceUpdate;
   final String publishedAt;
+  final String apkSha256;
 
   const AppReleaseInfo({
     required this.latestVersion,
@@ -22,6 +23,7 @@ class AppReleaseInfo {
     required this.releaseNotes,
     required this.forceUpdate,
     required this.publishedAt,
+    this.apkSha256 = '',
   });
 
   factory AppReleaseInfo.fromJson(Map<String, dynamic> json) {
@@ -33,6 +35,7 @@ class AppReleaseInfo {
       releaseNotes: json['release_notes'] as String? ?? '',
       forceUpdate: json['force_update'] as bool? ?? false,
       publishedAt: json['published_at'] as String? ?? '',
+      apkSha256: json['apk_sha256'] as String? ?? '',
     );
   }
 
@@ -44,6 +47,7 @@ class AppReleaseInfo {
         'release_notes': releaseNotes,
         'force_update': forceUpdate,
         'published_at': publishedAt,
+        'apk_sha256': apkSha256,
       };
 }
 
@@ -78,12 +82,14 @@ class AwsReleaseService {
   }) async {
     await AwsConfig.initCredentials();
     String finalDownloadUrl = customDownloadUrl?.trim() ?? '';
+    String calculatedSha256 = '';
 
     // 1. Upload APK to S3 if provided
     if (apkFile != null && await apkFile.exists()) {
-      onProgress?.call(0.1, 'Uploading APK to AWS S3...');
+      onProgress?.call(0.1, 'Hashing and uploading APK to AWS S3...');
       final s3Key = 'releases/app-v$versionName.apk';
       final fileBytes = await apkFile.readAsBytes();
+      calculatedSha256 = sha256.convert(fileBytes).toString();
 
       await _putS3Object(
         key: s3Key,
@@ -105,6 +111,7 @@ class AwsReleaseService {
       releaseNotes: releaseNotes,
       forceUpdate: forceUpdate,
       publishedAt: DateTime.now().toUtc().toIso8601String(),
+      apkSha256: calculatedSha256,
     );
 
     final jsonBytes = utf8.encode(json.encode(releaseInfo.toJson()));

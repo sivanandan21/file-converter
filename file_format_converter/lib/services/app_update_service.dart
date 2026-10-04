@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:open_filex/open_filex.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -15,6 +17,7 @@ class AppUpdateInfo {
   final String releaseNotes;
   final bool forceUpdate;
   final String publishedAt;
+  final String apkSha256;
 
   const AppUpdateInfo({
     required this.latestVersion,
@@ -24,6 +27,7 @@ class AppUpdateInfo {
     required this.releaseNotes,
     required this.forceUpdate,
     required this.publishedAt,
+    this.apkSha256 = '',
   });
 
   factory AppUpdateInfo.fromJson(Map<String, dynamic> json) {
@@ -35,6 +39,7 @@ class AppUpdateInfo {
       releaseNotes: json['release_notes'] as String? ?? '',
       forceUpdate: json['force_update'] as bool? ?? false,
       publishedAt: json['published_at'] as String? ?? '',
+      apkSha256: json['apk_sha256'] as String? ?? '',
     );
   }
 }
@@ -62,18 +67,32 @@ class AppUpdateService {
       if (_isVersionNewer(updateInfo.latestVersion, currentVersion)) {
         return updateInfo;
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('[AppUpdateService] checkForUpdate error: $e');
+    }
     return null;
   }
 
-  /// Downloads the APK directly from AWS S3 with live progress tracking
+  /// Downloads the APK directly from AWS S3 with live progress tracking,
+  /// automatic temp cache cleanup, and SHA-256 cryptographic verification.
   Future<String?> downloadApk(
     String downloadUrl, {
+    String? expectedSha256,
     void Function(double progress, int received, int total)? onProgress,
   }) async {
     try {
+      // 1. Validate URL scheme
+      final uri = Uri.tryParse(downloadUrl);
+      if (uri == null || uri.scheme != 'https') {
+        throw const FormatException('Insecure or invalid download URL');
+      }
+
+      // 2. Clean previous temporary APKs to prevent storage bloat
+      final tempDir = Directory.systemTemp;
+      _cleanOldTempApks(tempDir);
+
       final client = http.Client();
-      final request = http.Request('GET', Uri.parse(downloadUrl));
+      final request = http.Request('GET', uri);
       final response = await client.send(request);
 
       if (response.statusCode != 200) {
@@ -81,7 +100,6 @@ class AppUpdateService {
       }
 
       final contentLength = response.contentLength ?? 0;
-      final tempDir = Directory.systemTemp;
       final filePath =
           '${tempDir.path}${Platform.pathSeparator}update_${DateTime.now().millisecondsSinceEpoch}.apk';
       final file = File(filePath);
@@ -107,10 +125,43 @@ class AppUpdateService {
       await sink.close();
       client.close();
 
+      // 3. Cryptographic integrity check (SHA-256)
+      if (expectedSha256 != null && expectedSha256.isNotEmpty) {
+        final downloadedBytes = await file.readAsBytes();
+        final actualHash = sha256.convert(downloadedBytes).toString();
+        if (actualHash.toLowerCase() != expectedSha256.toLowerCase()) {
+          debugPrint(
+            '[AppUpdateService] Checksum mismatch! Expected: $expectedSha256, Actual: $actualHash',
+          );
+          if (await file.exists()) {
+            await file.delete();
+          }
+          throw const FormatException('Downloaded APK integrity verification failed.');
+        }
+      }
+
       return filePath;
-    } catch (_) {
+    } catch (e) {
+      debugPrint('[AppUpdateService] downloadApk error: $e');
       return null;
     }
+  }
+
+  /// Removes leftover update APKs from the temporary directory
+  void _cleanOldTempApks(Directory dir) {
+    try {
+      if (!dir.existsSync()) return;
+      final list = dir.listSync();
+      for (final entity in list) {
+        if (entity is File &&
+            entity.path.endsWith('.apk') &&
+            entity.uri.pathSegments.last.startsWith('update_')) {
+          try {
+            entity.deleteSync();
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
   }
 
   /// Launches the downloaded APK to prompt native installation,

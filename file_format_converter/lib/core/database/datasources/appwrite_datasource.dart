@@ -11,7 +11,7 @@ import '../repositories/user_device_repository.dart';
 ///   1. Create an Appwrite project and note the Project ID.
 ///   2. Create a Database named "file_converter_db".
 ///   3. Create a Collection named "user_devices" with the same attributes
-///      as the Supabase `user_devices` table.
+///      as the DynamoDB `file_converter_devices` table.
 ///   4. Set collection permissions to allow your API key to read/write.
 ///   5. Fill in AppwriteConfig below (or inject via DatabaseManager).
 class AppwriteUserDeviceRepository implements UserDeviceRepository {

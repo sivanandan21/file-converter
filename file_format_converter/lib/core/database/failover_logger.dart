@@ -1,10 +1,9 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'failover_event.dart';
-import 'db_provider.dart';
 
-/// Persists failover events locally and notifies the admin via Supabase
+/// Persists failover events locally and prints to diagnostics log
 /// (best-effort — never throws, since it runs during a failover).
 class FailoverLogger {
   static const _prefsKey = 'failover_log';
@@ -16,11 +15,9 @@ class FailoverLogger {
 
   // ── Public API ──────────────────────────────────────────────────────────────
 
-  /// Record a failover event locally, then attempt to push it to Supabase
-  /// and trigger an admin notification.
+  /// Record a failover event locally
   Future<void> log(FailoverEvent event) async {
     _appendLocal(event);
-    await _notifyAdmin(event);
     _printToConsole(event);
   }
 
@@ -58,24 +55,8 @@ class FailoverLogger {
     }
   }
 
-  Future<void> _notifyAdmin(FailoverEvent event) async {
-    // Push a row to the `failover_log` Supabase table (best-effort).
-    // The table should be created once: see db_setup.sql in project root.
-    try {
-      await Supabase.instance.client.from('failover_log').insert({
-        'timestamp': event.timestamp.toIso8601String(),
-        'from_provider': event.from.label,
-        'to_provider': event.to.label,
-        'reason': event.reason,
-      });
-    } catch (_) {
-      // Supabase may itself be offline during a failover; that is fine.
-    }
-  }
-
   void _printToConsole(FailoverEvent event) {
-    // ignore: avoid_print
-    print('[DB-FAILOVER] $event');
+    debugPrint('[DB-FAILOVER] $event');
   }
 }
 

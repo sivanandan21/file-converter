@@ -4,7 +4,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/constants/app_constants.dart';
 import '../../providers/app_providers.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 class SplashScreen extends ConsumerStatefulWidget {
   const SplashScreen({super.key});
@@ -88,12 +87,6 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
   }
 
   void _navigate() {
-    final session = Supabase.instance.client.auth.currentSession;
-    if (session == null) {
-      Navigator.of(context).pushReplacementNamed('/login');
-      return;
-    }
-
     final freemiumService = ref.read(freemiumServiceProvider);
     if (freemiumService.isOnboardingDone) {
       Navigator.of(context).pushReplacementNamed('/home');

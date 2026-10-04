@@ -5,7 +5,6 @@ import '../../core/theme/app_theme.dart';
 import '../../core/constants/app_constants.dart';
 import '../../providers/app_providers.dart';
 import '../pro/pro_screen.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../services/app_update_service.dart';
 import '../../widgets/update_dialog_3d.dart';
 
@@ -103,14 +102,6 @@ class SettingsScreen extends ConsumerWidget {
             onTap: () => _confirmClearHistory(context, ref),
           ),
 
-          const SizedBox(height: 20),
-          const _SectionHeader('Account'),
-          _SettingsTile(
-            icon: Icons.logout_rounded,
-            label: 'Logout',
-            iconColor: AppColors.error,
-            onTap: () => _confirmLogout(context, ref),
-          ),
 
           const SizedBox(height: 20),
           const _SectionHeader('About'),
@@ -213,33 +204,6 @@ class SettingsScreen extends ConsumerWidget {
     );
   }
 
-  void _confirmLogout(BuildContext context, WidgetRef ref) {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: Theme.of(context).colorScheme.surface,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text('Logout'),
-        content: const Text('Are you sure you want to log out?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () async {
-              Navigator.pop(ctx);
-              await Supabase.instance.client.auth.signOut();
-              if (context.mounted) {
-                Navigator.of(context).pushNamedAndRemoveUntil('/login', (route) => false);
-              }
-            },
-            child: const Text('Logout', style: TextStyle(color: AppColors.error)),
-          ),
-        ],
-      ),
-    );
-  }
 
   Future<void> _manualCheckForUpdate(BuildContext context) async {
     ScaffoldMessenger.of(context).showSnackBar(

@@ -3,28 +3,17 @@ import 'db_provider.dart';
 import 'failover_event.dart';
 import 'failover_logger.dart';
 import 'repositories/user_device_repository.dart';
-import 'datasources/supabase_datasource.dart';
+import 'datasources/aws_dynamodb_datasource.dart';
 import 'datasources/cloudflare_d1_datasource.dart';
 import 'datasources/appwrite_datasource.dart';
 
-/// Orchestrates automatic failover across Supabase → Cloudflare D1 → Appwrite.
-///
-/// All callers interact with this class exactly like a [UserDeviceRepository].
-/// Switching is transparent: if a write (or health check) fails on the active
-/// backend, the manager promotes the next backend and retries the operation.
-///
-/// Failover chain:
-///   Supabase (primary)
-///     └─→ Cloudflare D1 (secondary)
-///           └─→ Appwrite (tertiary)
-///
-/// Recovery: every 5 minutes the manager silently probes Supabase. If it is
-/// healthy again, it automatically reinstates it as the active backend.
+/// Orchestrates automatic failover across AWS DynamoDB → Cloudflare D1 → Appwrite.
 class DatabaseManager implements UserDeviceRepository {
   // ── State ────────────────────────────────────────────────────────────────────
 
-  DbProvider _active = DbProvider.supabase;
+  DbProvider _active = DbProvider.awsDynamoDb;
   DbProvider get activeProvider => _active;
+  List<FailoverEvent> get failoverHistory => _logger.localEvents;
 
   final Map<DbProvider, UserDeviceRepository> _backends;
   final FailoverLogger _logger;
@@ -42,19 +31,15 @@ class DatabaseManager implements UserDeviceRepository {
         _logger = logger;
 
   /// Factory that wires all three backends.
-  ///
-  /// [cloudflareWorkerUrl] and [cloudflareApiKey] are required for D1.
-  /// [appwriteClient] is required for Appwrite.
-  /// Leaving them null effectively skips that tier.
   static DatabaseManager create({
     required SharedPreferences prefs,
-    SupabaseUserDeviceRepository? supabaseRepo,
+    AwsDynamoDbUserDeviceRepository? awsRepo,
     CloudflareD1UserDeviceRepository? cloudflareRepo,
     AppwriteUserDeviceRepository? appwriteRepo,
   }) {
     final backends = <DbProvider, UserDeviceRepository>{
-      DbProvider.supabase:
-          supabaseRepo ?? SupabaseUserDeviceRepository(),
+      DbProvider.awsDynamoDb:
+          awsRepo ?? AwsDynamoDbUserDeviceRepository(),
       if (cloudflareRepo != null)
         DbProvider.cloudflareD1: cloudflareRepo,
       if (appwriteRepo != null)
@@ -77,7 +62,7 @@ class DatabaseManager implements UserDeviceRepository {
     Future<T> Function(UserDeviceRepository repo) operation, {
     bool isWrite = true,
   }) async {
-    // Periodically attempt to recover to Supabase.
+    // Periodically attempt to recover to AWS DynamoDB.
     await _maybeRecover();
 
     final chain = _buildChain();
@@ -100,10 +85,10 @@ class DatabaseManager implements UserDeviceRepository {
         // active, record the failover.
         if (provider != _active) {
           final event = FailoverEvent(
-            timestamp: DateTime.now().utc,
+            timestamp: DateTime.now().toUtc(),
             from: _active,
             to: provider,
-            reason: lastError?.toString() ?? 'Primary backend unavailable',
+            reason: lastError?.toString() ?? 'Primary backend call failed',
           );
           _active = provider;
           await _logger.log(event);
@@ -112,7 +97,8 @@ class DatabaseManager implements UserDeviceRepository {
         return result;
       } on Exception catch (e) {
         lastError = e;
-        // Continue to next backend.
+        // Don't log single-call failures as failovers yet; loop tries next tier.
+        continue;
       }
     }
 
@@ -123,7 +109,7 @@ class DatabaseManager implements UserDeviceRepository {
   /// Returns the ordered list of backends starting from the current active one.
   List<DbProvider> _buildChain() {
     const order = [
-      DbProvider.supabase,
+      DbProvider.awsDynamoDb,
       DbProvider.cloudflareD1,
       DbProvider.appwrite,
     ];
@@ -131,28 +117,28 @@ class DatabaseManager implements UserDeviceRepository {
     final startIndex = order.indexOf(_active);
     return [
       ...order.sublist(startIndex),
-      ...order.sublist(0, startIndex), // wrap-around (shouldn't normally happen)
+      ...order.sublist(0, startIndex), // wrap-around
     ].where((p) => _backends.containsKey(p)).toList();
   }
 
-  /// If Supabase is healthy and isn't the active backend, reinstate it.
+  /// If AWS DynamoDB is healthy and isn't the active backend, reinstate it.
   Future<void> _maybeRecover() async {
-    if (_active == DbProvider.supabase) return;
+    if (_active == DbProvider.awsDynamoDb) return;
     final now = DateTime.now();
     if (now.difference(_lastRecoveryAttempt) < _recoveryInterval) return;
     _lastRecoveryAttempt = now;
 
-    final supabase = _backends[DbProvider.supabase];
-    if (supabase == null) return;
-    final healthy = await supabase.isHealthy();
+    final aws = _backends[DbProvider.awsDynamoDb];
+    if (aws == null) return;
+    final healthy = await aws.isHealthy();
     if (healthy) {
       final event = FailoverEvent(
         timestamp: now.toUtc(),
         from: _active,
-        to: DbProvider.supabase,
-        reason: 'Supabase recovered — reinstating primary backend',
+        to: DbProvider.awsDynamoDb,
+        reason: 'AWS DynamoDB recovered — reinstating primary backend',
       );
-      _active = DbProvider.supabase;
+      _active = DbProvider.awsDynamoDb;
       await _logger.log(event);
     }
   }
@@ -171,32 +157,31 @@ class DatabaseManager implements UserDeviceRepository {
 
   @override
   Future<void> insertDevice(Map<String, dynamic> data) =>
-      _withFailover((r) => r.insertDevice(data));
+      _withFailover((r) => r.insertDevice(data), isWrite: true);
 
   @override
   Future<void> upsertDevice(String deviceId, Map<String, dynamic> data) =>
-      _withFailover((r) => r.upsertDevice(deviceId, data));
+      _withFailover((r) => r.upsertDevice(deviceId, data), isWrite: true);
 
   @override
   Future<void> updateDevice(String deviceId, Map<String, dynamic> fields) =>
-      _withFailover((r) => r.updateDevice(deviceId, fields));
+      _withFailover((r) => r.updateDevice(deviceId, fields), isWrite: true);
 
   @override
   Future<void> deleteDevice(String deviceId) =>
-      _withFailover((r) => r.deleteDevice(deviceId));
+      _withFailover((r) => r.deleteDevice(deviceId), isWrite: true);
 
   @override
-  Future<void> incrementCounter(String deviceId, String column, {int by = 1}) =>
-      _withFailover((r) => r.incrementCounter(deviceId, column, by: by));
+  Future<void> incrementCounter(
+    String deviceId,
+    String column, {
+    int by = 1,
+  }) =>
+      _withFailover(
+        (r) => r.incrementCounter(deviceId, column, by: by),
+        isWrite: true,
+      );
 
   @override
   Future<bool> isHealthy() => _current.isHealthy();
-
-  // ── Diagnostics ──────────────────────────────────────────────────────────────
-
-  List<FailoverEvent> get failoverHistory => _logger.localEvents;
-}
-
-extension on DateTime {
-  DateTime get utc => toUtc();
 }

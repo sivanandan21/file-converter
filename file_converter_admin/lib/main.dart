@@ -1,27 +1,27 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
-import 'config/supabase_config.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'config/aws_config.dart';
 import 'screens/login_screen.dart';
 import 'screens/dashboard_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Supabase.initialize(
-    url: SupabaseConfig.url,
-    publishableKey: SupabaseConfig.anonKey,
-  );
-  runApp(const AdminApp());
+  await AwsConfig.initCredentials();
+  final prefs = await SharedPreferences.getInstance();
+  final isLoggedIn = prefs.getBool('is_admin_logged_in') ?? false;
+
+  runApp(AdminApp(isLoggedIn: isLoggedIn));
 }
 
 class AdminApp extends StatelessWidget {
-  const AdminApp({super.key});
+  final bool isLoggedIn;
+  const AdminApp({super.key, required this.isLoggedIn});
 
   @override
   Widget build(BuildContext context) {
-    final session = Supabase.instance.client.auth.currentSession;
     return MaterialApp(
-      title: 'File Converter Admin',
+      title: 'AWS File Converter Admin',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -41,7 +41,7 @@ class AdminApp extends StatelessWidget {
           elevation: 0,
         ),
       ),
-      home: session != null ? const DashboardScreen() : const LoginScreen(),
+      home: isLoggedIn ? const DashboardScreen() : const LoginScreen(),
     );
   }
 }

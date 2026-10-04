@@ -4,8 +4,8 @@
 ///  HOW TO SET UP EACH BACKEND
 /// ─────────────────────────────────────────────────────────────────────────────
 ///
-/// ① SUPABASE (primary — already configured, no changes needed)
-///    Your existing Supabase project is used automatically.
+/// ① AWS DYNAMODB (primary — configured via pure-Dart SigV4)
+///    Uses AWS DynamoDB table 'file_converter_devices' in Sydney (ap-southeast-2).
 ///
 /// ② CLOUDFLARE D1 (secondary)
 ///    1. Create a Cloudflare account → Workers & Pages → D1 → Create database
