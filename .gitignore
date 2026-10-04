@@ -1,0 +1,44 @@
+# Backups & Temporary files
+file_format_converter_backup_*/
+*.png
+*.jpg
+*.jpeg
+!play_store_assets/**
+
+# Flutter / Dart
+**/build/
+**/.dart_tool/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/.pub-cache/
+**/.pub/
+**/pubspec.lock
+
+# IDE & OS
+**/.idea/
+**/.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Android
+**/android/.gradle/
+**/android/local.properties
+**/android/app/debug/
+**/android/app/profile/
+**/android/app/release/
+
+# iOS
+**/ios/Pods/
+**/ios/.symlinks/
+**/ios/Flutter/Flutter.framework
+**/ios/Flutter/Flutter.podspec
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/app.flx
+**/ios/Flutter/app.zip
+**/ios/Flutter/flutter_assets/
+**/ios/ServiceDefinitions.json
+
+# Agents & AI
+.agents/
+.codex/

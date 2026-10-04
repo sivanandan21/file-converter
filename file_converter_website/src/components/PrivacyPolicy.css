@@ -1,0 +1,17 @@
+.policy-section { padding: 120px 0; }
+.policy-list { display: flex; flex-direction: column; gap: 10px; max-width: 800px; margin: 0 auto; }
+.policy-item { overflow: hidden; }
+.policy-toggle {
+  width: 100%; display: flex; align-items: center; justify-content: space-between;
+  padding: 20px 24px; background: none; border: none; cursor: pointer;
+  color: var(--text); text-align: left; gap: 12px;
+}
+.policy-title { font-size: 16px; font-weight: 700; }
+.policy-arrow { font-size: 18px; color: var(--primary-light); flex-shrink: 0; }
+.policy-content { overflow: hidden; }
+.policy-text {
+  padding: 0 24px 24px;
+  font-size: 14px; color: var(--text-muted);
+  line-height: 1.8;
+  white-space: pre-line;
+}

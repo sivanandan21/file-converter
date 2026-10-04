@@ -1,0 +1,4 @@
+storePassword=fileconv2024
+keyPassword=fileconv2024
+keyAlias=file_converter
+storeFile=release.jks
