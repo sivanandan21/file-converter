@@ -10,6 +10,8 @@ import '../../widgets/file_row_tile.dart';
 import '../../widgets/neumorphic_card.dart';
 import '../convert/convert_screen.dart';
 import '../pro/pro_screen.dart';
+import '../../services/app_update_service.dart';
+import '../../widgets/update_dialog_3d.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
@@ -64,6 +66,20 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           });
         }
       });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkForAppUpdate();
+    });
+  }
+
+  Future<void> _checkForAppUpdate() async {
+    try {
+      final update = await AppUpdateService().checkForUpdate();
+      if (update != null && mounted) {
+        UpdateDialog3D.show(context, update);
+      }
+    } catch (e) {
+      debugPrint('App update check error: $e');
+    }
   }
 
   @override

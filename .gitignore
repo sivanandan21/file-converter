@@ -42,3 +42,10 @@ Thumbs.db
 # Agents & AI
 .agents/
 .codex/
+
+# Secrets & Local Configs
+*.local.dart
+*.local.json
+.env*
+**/secrets/
+

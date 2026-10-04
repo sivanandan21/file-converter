@@ -437,7 +437,7 @@ class _UserDetailScreenState extends State<UserDetailScreen> {
                     width: double.infinity,
                     height: 48,
                     child: ElevatedButton.icon(
-                      onPressed: () => _forceLogout(context),
+                      onPressed: _forceLogout,
                       icon: const Icon(Icons.logout_rounded, color: Colors.white),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: const Color(0xFFDC2626),
@@ -459,7 +459,7 @@ class _UserDetailScreenState extends State<UserDetailScreen> {
                     width: double.infinity,
                     height: 48,
                     child: OutlinedButton.icon(
-                      onPressed: () => _resetQuotas(context),
+                      onPressed: _resetQuotas,
                       icon: const Icon(Icons.refresh_rounded, color: Color(0xFF10B981)),
                       style: OutlinedButton.styleFrom(
                         side: const BorderSide(color: Color(0xFF10B981)),
@@ -485,7 +485,7 @@ class _UserDetailScreenState extends State<UserDetailScreen> {
     );
   }
   
-  Future<void> _forceLogout(BuildContext context) async {
+  Future<void> _forceLogout() async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -510,7 +510,7 @@ class _UserDetailScreenState extends State<UserDetailScreen> {
     }
   }
 
-  Future<void> _resetQuotas(BuildContext context) async {
+  Future<void> _resetQuotas() async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(

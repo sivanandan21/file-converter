@@ -6,6 +6,8 @@ import '../../core/constants/app_constants.dart';
 import '../../providers/app_providers.dart';
 import '../pro/pro_screen.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../services/app_update_service.dart';
+import '../../widgets/update_dialog_3d.dart';
 
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
@@ -133,6 +135,13 @@ class SettingsScreen extends ConsumerWidget {
             onTap: () => _launchUrl('mailto:privacy@smc-apps.com?subject=File%20Converter%20Support'),
           ),
           _SettingsTile(
+            icon: Icons.system_update_rounded,
+            label: 'Check for Updates',
+            iconColor: AppColors.primary,
+            trailing: const Icon(Icons.chevron_right_rounded, size: 20),
+            onTap: () => _manualCheckForUpdate(context),
+          ),
+          _SettingsTile(
             icon: Icons.info_outline_rounded,
             label: 'App Version',
             trailing: Text(
@@ -230,6 +239,37 @@ class SettingsScreen extends ConsumerWidget {
         ],
       ),
     );
+  }
+
+  Future<void> _manualCheckForUpdate(BuildContext context) async {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Checking AWS for updates...'),
+        duration: Duration(milliseconds: 1200),
+      ),
+    );
+    try {
+      final update = await AppUpdateService().checkForUpdate();
+      if (!context.mounted) return;
+      if (update != null) {
+        UpdateDialog3D.show(context, update);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("You're on the latest version!"),
+            backgroundColor: AppColors.success,
+          ),
+        );
+      }
+    } catch (_) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not reach update server. Please try again later.'),
+          backgroundColor: AppColors.error,
+        ),
+      );
+    }
   }
 }
 
